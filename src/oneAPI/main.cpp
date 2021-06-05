@@ -276,24 +276,8 @@ void update(scl::queue& deviceQ, MainParams& mainParams, std::vector<Buffer3D>& 
     handle_walls<N>(deviceQ, Unew);
 }
 
-//************************************
-// Function description: create a device queue with the default selector or
-// explicit FPGA selector when FPGA macro is defined
-//    return: DPC++ queue object
-//************************************
 scl::queue create_device_queue() {
-    // create device selector for the device of your interest
-#ifdef FPGA_EMULATOR
-  // DPC++ extension: FPGA emulator selector on systems without FPGA card
-    INTEL::fpga_emulator_selector dselector;
-#elif defined(FPGA)
-  // DPC++ extension: FPGA selector on systems with FPGA card
-    INTEL::fpga_selector dselector;
-#else
-  // the default device selector: it will select the most performant device
-  // available at runtime.
     scl::default_selector dselector;
-#endif
 
     // create an async exception handler so the program fails more gracefully.
     auto ehandler = [](scl::exception_list exceptionList) {

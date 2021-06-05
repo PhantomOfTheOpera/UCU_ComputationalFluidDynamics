@@ -1,0 +1,66 @@
+n: &n 52
+N: &N 500
+INIT_DIR: &INIT_DIR "init_states"
+SCENARIO: &SCENARIO "explosion"
+RESULT_DIR: "results"
+
+n_: &n_ !nscale [*n]
+FRAMEWORKS:
+
+  CPP_SEQ:
+
+  # CPP_PARALLEL:
+  #   CMD: "./src/cpp/main"
+  #   BACKENDS:
+  #     CPU:
+  #       N_THREADS_CPP: &N_THREADS_CPP 8
+  #       ARGS: [*n_, *N, *N_THREADS_CPP, !join [*INIT_DIR, "/", *SCENARIO, "_", *n_, ".txt"]]
+  #       T: 20
+
+  # AF:
+  #   CMD: "./src/arrayfire/build/main"
+  #   BACKENDS:
+  #     CPU:
+  #       ARGS: [*n_, *N, !join [*INIT_DIR, "/", *SCENARIO, "_", *n_, ".af"], "CPU"]
+  #       T: 3
+  #     OPENCL_CPU:
+  #       ARGS: [*n_, *N, !join [*INIT_DIR, "/", *SCENARIO, "_", *n_, ".af"], "OPENCL_CPU"]
+  #       T: 3
+  #     OPENCL_GPU:
+  #       ARGS: [*n_, *N, !join [*INIT_DIR, "/", *SCENARIO, "_", *n_, ".af"], "OPENCL_GPU"]
+  #       T: 100
+  #     CUDA:
+  #       ARGS: [*n_, *N, !join [*INIT_DIR, "/", *SCENARIO, "_", *n_, ".af"], "CUDA"]
+  #       T: 100
+
+  # DPC++:
+
+  # MPI:
+  #   CMD: "/usr/bin/mpirun"
+  #   BACKENDS:
+  #     CPU:
+  #       MPI_CPUn_PROC: &MPI_CPUn_PROC 10
+  #       ARGS: ["-np", *MPI_CPUn_PROC, "src/mpi/build/mpi_app", *n_, *N, "CPU"]
+  #       T: 20
+  #     OPENCL_GPU:
+  #       ARGS: ["-np", 1, "src/mpi/build/mpi_app", *n_, *N, "OPENCL_GPU"]
+  #       T: 100
+  #     CUDA:
+  #       ARGS: ["-np", 1, "src/mpi/build/mpi_app", *n_, *N, "CUDA"]
+  #       T: 100
+  #     OPENCL_GPU2:
+  #       ARGS: ["-np", 2, "src/mpi/build/mpi_app", *n_, *N, "OPENCL_GPU"]
+  #       T: 100
+  #     CUDA2:
+  #       ARGS: ["-np", 2, "src/mpi/build/mpi_app", *n_, *N, "CUDA"]
+  #       T: 100
+  
+  PYTORCH:
+    CMD: "./src/python/torch_3D.py"
+    BACKENDS:
+      CPU:
+        ARGS: [*n_, *N, !join [*INIT_DIR, "/", *SCENARIO, "_", *n_, ".txt"], "CPU"]
+        T: 25
+      CUDA:
+        ARGS: [*n_, *N, !join [*INIT_DIR, "/", *SCENARIO, "_", *n_, ".txt"], "CUDA"]
+        T: 25

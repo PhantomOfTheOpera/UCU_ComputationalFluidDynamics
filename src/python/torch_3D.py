@@ -1,27 +1,21 @@
 #!/home/fedynyak/miniconda3/envs/ntire/bin/python
 import time
 import torch
-import numpy as np
-import tqdm
-import pandas as pd
-import os
-import random
 import sys
-
-
-device = "cuda"
 
 
 class Fluid3D:
 
-    gamma = torch.Tensor([7/5]).to(device)
-    k = torch.Tensor([300]).to(device)
-    R = torch.Tensor([8.31]).to(device)
-    mu = torch.Tensor([0.029]).to(device)
-    c = torch.Tensor([R / ((gamma - 1) * mu)]).to(device)
-    v_sound = torch.Tensor([343]).to(device)
+    def __init__(self, n, device, init_state):
 
-    def __init__(self, n):
+        self.device = device
+
+        self.gamma = torch.Tensor([7/5]).to(device)
+        self.k = torch.Tensor([300]).to(device)
+        self.R = torch.Tensor([8.31]).to(device)
+        self.mu = torch.Tensor([0.029]).to(device)
+        self.c = torch.Tensor([self.R / ((self.gamma - 1) * self.mu)]).to(device)
+        self.v_sound = torch.Tensor([343]).to(device)
 
         self.dx = torch.Tensor([0.001]).to(device)
         self.dy = torch.Tensor([0.001]).to(device)
@@ -33,23 +27,16 @@ class Fluid3D:
         self.fz = torch.zeros((n, n, n)).to(device)
 
         self.n = n
-        self.U = self.params2U_parallel(self.n, 1.25, 0, 0, 0, 300)
+        self.U = torch.zeros((n, n, n, 5))
+        self.U_predictor = torch.zeros((n, n, n, 5))
+        self.U_corrector = torch.zeros((n, n, n, 5))
 
-        self.surfs4d = []
-        self.vecs4d = []
+        self.read_init_state(init_state)
 
-        self.U[n//2 + 1, n//2 + 1, n//2 + 1, :] = self.params2U_parallel(1, 1.25, 0, 0, 0, 400)
+        self.U = self.U.to(device)
+        self.U_predictor = self.U_predictor.to(device)
+        self.U_corrector = self.U_corrector.to(device)
 
-    def params2U_parallel(self, n, ro, vx, vy, vz, T):
-
-        U = torch.zeros((n, n, n, 5)).to(device)
-        U[:,:,:,0] = ro
-        U[:,:,:,1] = vx 
-        U[:,:,:,2] = vy
-        U[:,:,:,3] = vz
-        U[:,:,:,4] = ro * T * ro * self.c
-
-        return U
 
     def update_RO(self, Unew, U,  dt):
 
@@ -75,10 +62,10 @@ class Fluid3D:
                     + dt * self.gamma * (U[2:n-1:2, 0:n-3:2, 2:n-1:2, 4] + U[2:n-1:2, 2:n-1:2, 2:n-1:2, 4]) * U[2:n-1:2, 1:n-2:2, 2:n-1:2, 2] / (self.dy * 2)
                     - dt * self.gamma * (U[2:n-1:2, 2:n-1:2, 4:n+1:2, 4] + U[2:n-1:2, 2:n-1:2, 2:n-1:2, 4]) * U[2:n-1:2, 2:n-1:2, 3:n:2, 3] / (self.dz * 2)
                     + dt * self.gamma * (U[2:n-1:2, 2:n-1:2, 0:n-3:2, 4] + U[2:n-1:2, 2:n-1:2, 2:n-1:2, 4]) * U[2:n-1:2, 2:n-1:2, 1:n-2:2, 3] / (self.dz * 2)
-                    + dt * U[2:n-1:2, 2:n-1:2, 2:n-1:2, 0] * self.q[2:n-1:2, 2:n-1:2, 2:n-1:2]
-                    + dt * U[2:n-1:2, 2:n-1:2, 2:n-1:2, 0] * (self.fx[2:n-1:2, 2:n-1:2, 2:n-1:2] * (U[3:n:2, 2:n-1:2, 2:n-1:2, 1] + U[1:n-2:2, 2:n-1:2, 2:n-1:2, 1]) / 2 
-                                                            + self.fy[2:n-1:2, 2:n-1:2, 2:n-1:2] * (U[2:n-1:2, 3:n:2, 2:n-1:2, 2] + U[2:n-1:2, 1:n-2:2, 2:n-1:2, 2]) / 2 
-                                                            + self.fz[2:n-1:2, 2:n-1:2, 2:n-1:2] * (U[2:n-1:2, 2:n-1:2, 3:n:2, 3] + U[2:n-1:2, 2:n-1:2, 1:n-2:2, 3]) / 2)
+                    # + dt * U[2:n-1:2, 2:n-1:2, 2:n-1:2, 0] * self.q[2:n-1:2, 2:n-1:2, 2:n-1:2]
+                    # + dt * U[2:n-1:2, 2:n-1:2, 2:n-1:2, 0] * (self.fx[2:n-1:2, 2:n-1:2, 2:n-1:2] * (U[3:n:2, 2:n-1:2, 2:n-1:2, 1] + U[1:n-2:2, 2:n-1:2, 2:n-1:2, 1]) / 2 
+                    #                                         + self.fy[2:n-1:2, 2:n-1:2, 2:n-1:2] * (U[2:n-1:2, 3:n:2, 2:n-1:2, 2] + U[2:n-1:2, 1:n-2:2, 2:n-1:2, 2]) / 2 
+                    #                                         + self.fz[2:n-1:2, 2:n-1:2, 2:n-1:2] * (U[2:n-1:2, 2:n-1:2, 3:n:2, 3] + U[2:n-1:2, 2:n-1:2, 1:n-2:2, 3]) / 2)
             )
 
         Unew[2:n-1:2, 2:n-1:2, 2:n-1:2, 4] = (Unew[2:n-1:2, 2:n-1:2, 2:n-1:2, 4]
@@ -119,27 +106,19 @@ class Fluid3D:
             + dt * (self.fz[2:n-1:2, 2:n-1:2, 2:n-1:2] + self.fz[2:n-1:2, 2:n-1:2, 0:n-3:2]) / 2
         )
 
-    def _update(self, U):
+    def _update(self, U, Unew):
+
+        n = self.n
 
         dt = torch.Tensor([0.02 * (0
                             + abs(U[:,:,:,1]).max()/self.dx
                             + abs(U[:,:,:,2]).max()/self.dy
                             + abs(U[:,:,:,3]).max()/self.dz
-                            + (self.v_sound * (1/self.dx**2 + 1/self.dy**2 + 1/self.dz**2)**0.5))**-1]).to(device)
+                            + (self.v_sound * (1/self.dx**2 + 1/self.dy**2 + 1/self.dz**2)**0.5))**-1]).to(self.device)
         
-        Unew = torch.clone(U)
-
         self.update_RO(Unew, U, dt)
         self.update_E(Unew, U, dt)
         self.update_V(Unew, U, dt)
-
-        Unew[0, 1:-1, 1:-1] = Unew[1, 1:-1, 1:-1]
-        Unew[1:-1, 0, 1:-1] = Unew[1:-1, 1, 1:-1]
-        Unew[1:-1, 1:-1, 0] = Unew[1:-1, 1:-1, 1]
-
-        Unew[-1, 1:-1, 1:-1] = Unew[-2, 1:-1, 1:-1]
-        Unew[1:-1, -1, 1:-1] = Unew[1:-1, -2, 1:-1]
-        Unew[1:-1, 1:-1, -1] = Unew[1:-1, 1:-1, -2]
 
         Unew[1,:,:,1] = 0
         Unew[n-2,:,:,1] = 0
@@ -149,30 +128,43 @@ class Fluid3D:
 
         Unew[:,:,1,3] = 0
         Unew[:,:,n-2,3] = 0
-
-        return Unew
+    
+    def step(self):
+        self._update(self.U, self.U_predictor)
+        self._update(self.U_predictor, self.U_corrector)
+        self.U = (self.U + self.U_corrector) * 0.5
+    
+    def read_init_state(self, path):
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                x, y, z, ro, vx, vy, vz, e = map(float, line.split())
+                x, y, z = map(int, [x, y, z])
+                self.U[x, y, z] = torch.Tensor([ro, vx, vy, vz, e])
+                self.U_predictor[x, y, z] = torch.Tensor([ro, vx, vy, vz, e])
+                self.U_corrector[x, y, z] = torch.Tensor([ro, vx, vy, vz, e])
 
 
 if __name__ == "__main__":
 
     nargs = len(sys.argv)
 
-    N = int(sys.argv[2])
     n = int(sys.argv[1])
-    logfreq = int(sys.argv[3])
-    savefreq = int(sys.argv[4])
-    outpath = "data/torchsim/exp_1"
-    disable_tqdm = True
+    N = int(sys.argv[2])
+    init_state = sys.argv[3]
+    backend = sys.argv[4]
 
-    os.makedirs(outpath, exist_ok=True)
+    if backend == "CPU":
+        device = "cpu"
+    elif backend == "CUDA":
+        device = "cuda"
+    else:
+        print("BACKEND NOT SUPPORTED")
+        exit(1)
 
-    fluid = Fluid3D(n)
+    fluid = Fluid3D(n, device, init_state)
     start = time.time()
-    for idx in tqdm.tqdm(range(N), disable=True):
-
-        corrector = fluid._update(fluid.U)
-        predictor = fluid._update(corrector)
-
-        fluid.U = 0.5 * (corrector + predictor)
-
-        
+    for idx in range(N):
+        fluid.step()
+    end = time.time()
+    print(end - start)
