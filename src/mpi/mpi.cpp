@@ -3,13 +3,12 @@
 #include <vector>
 #include <array>
 #include <algorithm>
-#include <mpi.h>
 #include <boost/mpi.hpp>
 #include <boost/optional/optional_io.hpp>
 #include <thread>
 #include <tbb/concurrent_queue.h>
+#include <chrono>
 #include <arrayfire.h>
-#include <boost/serialization/vector.hpp>
 
 namespace mpi = boost::mpi;
 
@@ -20,10 +19,11 @@ class SysState {
 private:
     static int globalID;
     constexpr static double gammac = 1.3, k = 150.0, R = 8.31, mu = 0.29, v_sound = 343.0,
-    dx = 0.001, dy = 0.001, dz = 0.001;
+            dx = 0.001, dy = 0.001, dz = 0.001;
     constexpr static double c = R / (mu * (gammac - 1));
-    int n, n0, id, prevNode, nextNode;
+    int n, n0, id, prevNode, nextNode, trueStart;
     const mpi::communicator compute;
+    double *rightOut, *leftOut, *recvdData;
     af::array RO;
     af::array VX;
     af::array VY;
@@ -35,39 +35,21 @@ private:
     }
 
     void recvPartial(seq &&indexing, int node) {
-//        std::array<mpi::request, 5> requests;
-//        std::vector<double*> recvdData;
-        double* recvdData = new double [5*2*n*n];
-//        for (size_t i = 0; i < 5; i++) {
-//            recvdData.emplace_back(new double [2*n*n]);
-//        }
-        for (size_t i = 0; i < 1; i++) {
-            compute.irecv(node, makeTag(compute.rank(), static_cast<int>(i)), recvdData, 10*n*n).wait();
-//            requests[i].wait();
-        }
-//        mpi::wait_all(requests.begin(), requests.end());
-//        RO(indexing, span, span) = af::array{2, n, n, recvdData[0].data()}(span, span, span);
-//        VX(indexing, span, span) = af::array{2, n, n, recvdData[1].data()}(span, span, span);
-//        VY(indexing, span, span) = af::array{2, n, n, recvdData[2].data()}(span, span, span);
-//        VZ(indexing, span, span) = af::array{2, n, n, recvdData[3].data()}(span, span, span);
-//        E(indexing, span, span) = af::array{2, n, n, recvdData[4].data()}(span, span, span);
-//        for (auto& p : recvdData) {
-            delete[] recvdData;
-//        }
+        compute.irecv(node, makeTag(compute.rank(), 0), recvdData, 10*n*n).wait();
+        RO(indexing, span, span) = af::array{2, n, n, recvdData}(span, span, span);
+        VX(indexing, span, span) = af::array{2, n, n, recvdData + 2*n*n}(span, span, span);
+        VY(indexing, span, span) = af::array{2, n, n, recvdData + 4*n*n}(span, span, span);
+        VZ(indexing, span, span) = af::array{2, n, n, recvdData + 6*n*n}(span, span, span);
+        E(indexing, span, span) = af::array{2, n, n, recvdData + 8*n*n}(span, span, span);
     }
 
     void sendPartial(seq &&indexing, int node, double* tempBuffer) {
         RO(indexing, span, span).host(tempBuffer);
-//        compute.isend(node, makeTag(node, static_cast<int>(0)), tempBuffer, 2*n*n);
         VX(indexing, span, span).host(tempBuffer + 2*n*n);
-//        compute.isend(node, makeTag(node, static_cast<int>(1)), tempBuffer + 2*n*n, 2*n*n);
         VY(indexing, span, span).host(tempBuffer + 4*n*n);
-//        compute.isend(node, makeTag(node, static_cast<int>(2)), tempBuffer + 4*n*n, 2*n*n);
         VZ(indexing, span, span).host(tempBuffer + 6*n*n);
-//        compute.isend(node, makeTag(node, static_cast<int>(3)), tempBuffer + 6*n*n, 2*n*n);
         E(indexing, span, span).host(tempBuffer + 8*n*n);
-//        compute.isend(node, makeTag(node, static_cast<int>(4)), tempBuffer + 8*n*n, 2*n*n);
-        compute.isend(node, makeTag(node, static_cast<int>(0)), tempBuffer, 10*n*n);
+        compute.isend(node, makeTag(node, 0), tempBuffer, 10*n*n);
     }
 
     void recvFirst() {
@@ -91,30 +73,27 @@ private:
     }
 
     void sendReceive() {
-        double* tempBuffer = new double [5*2*n*n];
-
         if (compute.rank() != 0) {
-            sendPartial(seq(2, 3), prevNode, tempBuffer);
+            sendPartial(seq(2, 3), prevNode, leftOut);
         }
 
         if (compute.rank() != compute.size() - 1) {
-            sendPartial(seq(n0-4, n0-3), nextNode, tempBuffer);
+            sendPartial(seq(n0-4, n0-3), nextNode, rightOut);
         }
 
 
-//        recvFirst();
-    //    recvLast();
+        recvFirst();
+        recvLast();
 
-//        for (auto& p : tempBuffer) {
-//            delete[] p;
-//        }
-        delete[] tempBuffer;
+        compute.barrier();
     }
 
 public:
-    SysState(int n_, int n0_, double ro, double vx, double vy, double vz, double T,
+    SysState(int n_, int trueStart_, int n0_, double ro, double vx, double vy, double vz, double T,
              int prevNode_, int nextNode_, mpi::communicator& compute_) :
-             n(n_), n0(n0_), id(globalID++), prevNode(prevNode_), nextNode(nextNode_), compute(compute_) {
+            n(n_), n0(n0_), id(globalID++), prevNode(prevNode_), nextNode(nextNode_), compute(compute_),
+            recvdData(new double [10*n*n]), rightOut(new double [10*n*n]), leftOut(new double [10*n*n]),
+            trueStart(trueStart_) {
         RO = af::constant(ro, n0, n, n, f64);
         VX = af::constant(vx, n0, n, n, f64);
         VY = af::constant(vy, n0, n, n, f64);
@@ -123,12 +102,17 @@ public:
     }
 
     SysState(const SysState &st) :
-    n(st.n), n0(st.n0), id(globalID++), prevNode(st.prevNode), nextNode(st.nextNode), compute(st.compute) {
+            n(st.n), n0(st.n0), id(globalID++), prevNode(st.prevNode), nextNode(st.nextNode), compute(st.compute),
+            recvdData(new double [10*n*n]), rightOut(new double [10*n*n]), leftOut(new double [10*n*n]),
+            trueStart(st.trueStart) {
         RO = st.RO.copy();
         VX = st.VX.copy();
         VY = st.VY.copy();
         VZ = st.VZ.copy();
         E = st.E.copy();
+        std::copy(st.recvdData, st.recvdData+10*n*n, recvdData);
+        std::copy(st.leftOut, st.leftOut+10*n*n, leftOut);
+        std::copy(st.rightOut, st.rightOut+10*n*n, rightOut);
     }
 
     SysState operator+(SysState st) const {
@@ -163,46 +147,49 @@ public:
     void update(const SysState &U);
 
     void setE(size_t x, size_t y, size_t z, double ro_, double T) {
-        E(x, y, z) = ro_ * ro_ * c * T;
+        if (x >= trueStart && x <= trueStart + n0) {
+            E(x-trueStart, y, z) = ro_ * ro_ * c * T;
+        }
     }
+
+    virtual ~SysState();
 };
+
 
 int SysState::globalID = 0;
 
 
 void SysState::update(const SysState &U) {
-    // sendReceive();
+    sendReceive();
 
-    // std::array<double, 3> tMax{af::max<double>(af::abs(U.VX)), af::max<double>(af::abs(U.VY)), af::max<double>(af::abs(U.VZ))};
-    // for (double & mx : tMax) {
-    //     mpi::all_reduce(compute, mx, mpi::maximum<double>());
-    // }
-    // double dt = 0.005 / (tMax[0] / dx + tMax[1] / dy + tMax[2] / dz + v_sound * std::sqrt(1 / (dx*dx) + 1 / (dy*dy) + 1 / (dz*dz)));
-    double dt = 0.0000001;
-    // compute.barrier();
+    std::array<double, 3> tMax{af::max<double>(af::abs(U.VX)), af::max<double>(af::abs(U.VY)), af::max<double>(af::abs(U.VZ))};
+    for (double & mx : tMax) {
+        mpi::all_reduce(compute, mx, mpi::maximum<double>());
+    }
+    double dt = 0.005 / (tMax[0] / dx + tMax[1] / dy + tMax[2] / dz + v_sound * std::sqrt(1 / (dx*dx) + 1 / (dy*dy) + 1 / (dz*dz)));
 
     RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) = (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2))
-                                                               // X DENSITY CHANGE
-                                                               - dt * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(4, n0-1, 2), seq(2, n-3, 2), seq(2, n-3, 2))) * U.VX(seq(3, n0-2, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (dx * 2)
-                                                               + dt * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(0, n0-5, 2), seq(2, n-3, 2), seq(2, n-3, 2))) * U.VX(seq(1, n0-4, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (dx * 2)
-                                                               // Y DENSITY CHANGE
-                                                               - dt * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(2, n0-3, 2), seq(4, n-1, 2), seq(2, n-3, 2))) * U.VY(seq(2, n0-3, 2), seq(3, n-2, 2), seq(2, n-3, 2)) / (dy * 2)
-                                                               + dt * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(2, n0-3, 2), seq(0, n-5, 2), seq(2, n-3, 2))) * U.VY(seq(2, n0-3, 2), seq(1, n-4, 2), seq(2, n-3, 2)) / (dy * 2)
-                                                               // Z DENSITY CHANGE
-                                                               - dt * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(4, n-1, 2))) * U.VZ(seq(2, n0-3, 2), seq(2, n-3, 2), seq(3, n-2, 2)) / (dz * 2)
-                                                               + dt * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(0, n-5, 2))) * U.VZ(seq(2, n0-3, 2), seq(2, n-3, 2), seq(1, n-4, 2)) / (dz * 2)
+                                                           // X DENSITY CHANGE
+                                                           - dt * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(4, n0-1, 2), seq(2, n-3, 2), seq(2, n-3, 2))) * U.VX(seq(3, n0-2, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (dx * 2)
+                                                           + dt * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(0, n0-5, 2), seq(2, n-3, 2), seq(2, n-3, 2))) * U.VX(seq(1, n0-4, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (dx * 2)
+                                                           // Y DENSITY CHANGE
+                                                           - dt * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(2, n0-3, 2), seq(4, n-1, 2), seq(2, n-3, 2))) * U.VY(seq(2, n0-3, 2), seq(3, n-2, 2), seq(2, n-3, 2)) / (dy * 2)
+                                                           + dt * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(2, n0-3, 2), seq(0, n-5, 2), seq(2, n-3, 2))) * U.VY(seq(2, n0-3, 2), seq(1, n-4, 2), seq(2, n-3, 2)) / (dy * 2)
+                                                           // Z DENSITY CHANGE
+                                                           - dt * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(4, n-1, 2))) * U.VZ(seq(2, n0-3, 2), seq(2, n-3, 2), seq(3, n-2, 2)) / (dz * 2)
+                                                           + dt * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(0, n-5, 2))) * U.VZ(seq(2, n0-3, 2), seq(2, n-3, 2), seq(1, n-4, 2)) / (dz * 2)
     );
 
     E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) = (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2))
-                                                              // X ENERGY CHANGE
-                                                              - dt * gammac * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.E(seq(4, n0-1, 2), seq(2, n-3, 2), seq(2, n-3, 2))) * U.VX(seq(3, n0-2, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (dx * 2)
-                                                              + dt * gammac * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.E(seq(0, n0-5, 2), seq(2, n-3, 2), seq(2, n-3, 2))) * U.VX(seq(1, n0-4, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (dx * 2)
-                                                              // Y ENERGY CHANGE
-                                                              - dt * gammac * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.E(seq(2, n0-3, 2), seq(4, n-1, 2), seq(2, n-3, 2))) * U.VY(seq(2, n0-3, 2), seq(3, n-2, 2), seq(2, n-3, 2)) / (dy * 2)
-                                                              + dt * gammac * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.E(seq(2, n0-3, 2), seq(0, n-5, 2), seq(2, n-3, 2))) * U.VY(seq(2, n0-3, 2), seq(1, n-4, 2), seq(2, n-3, 2)) / (dy * 2)
-                                                              // Z ENERGY CHANGE
-                                                              - dt * gammac * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(4, n-1, 2))) * U.VZ(seq(2, n0-3, 2), seq(2, n-3, 2), seq(3, n-2, 2)) / (dz * 2)
-                                                              + dt * gammac * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(0, n-5, 2))) * U.VZ(seq(2, n0-3, 2), seq(2, n-3, 2), seq(1, n-4, 2)) / (dz * 2)
+                                                          // X ENERGY CHANGE
+                                                          - dt * gammac * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.E(seq(4, n0-1, 2), seq(2, n-3, 2), seq(2, n-3, 2))) * U.VX(seq(3, n0-2, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (dx * 2)
+                                                          + dt * gammac * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.E(seq(0, n0-5, 2), seq(2, n-3, 2), seq(2, n-3, 2))) * U.VX(seq(1, n0-4, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (dx * 2)
+                                                          // Y ENERGY CHANGE
+                                                          - dt * gammac * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.E(seq(2, n0-3, 2), seq(4, n-1, 2), seq(2, n-3, 2))) * U.VY(seq(2, n0-3, 2), seq(3, n-2, 2), seq(2, n-3, 2)) / (dy * 2)
+                                                          + dt * gammac * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.E(seq(2, n0-3, 2), seq(0, n-5, 2), seq(2, n-3, 2))) * U.VY(seq(2, n0-3, 2), seq(1, n-4, 2), seq(2, n-3, 2)) / (dy * 2)
+                                                          // Z ENERGY CHANGE
+                                                          - dt * gammac * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(4, n-1, 2))) * U.VZ(seq(2, n0-3, 2), seq(2, n-3, 2), seq(3, n-2, 2)) / (dz * 2)
+                                                          + dt * gammac * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(0, n-5, 2))) * U.VZ(seq(2, n0-3, 2), seq(2, n-3, 2), seq(1, n-4, 2)) / (dz * 2)
 
             // + dt * U.RO(seq(2, n-3, 2)) * self.q[2:n-1:2, 2:n-1:2, 2:n-1:2]
             // + dt * U[2:n-1:2, 2:n-1:2, 2:n-1:2, 0] * (self.fx[2:n-1:2, 2:n-1:2, 2:n-1:2] * (U[3:n:2, 2:n-1:2, 2:n-1:2, 1] + U[1:n-2:2, 2:n-1:2, 2:n-1:2, 1]) / 2
@@ -211,135 +198,105 @@ void SysState::update(const SysState &U) {
     );
 
     E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) = (E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2))
-                                                              // X THERMAL CHANGE
-                                                              + dt * k * (U.E(seq(4, n0-1, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(4, n0-1, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c) - U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c)) / (dx*dx)
-                                                              + dt * k * (U.E(seq(0, n0-5, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(0, n0-5, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c) - U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c)) / (dx*dx)
-                                                              // Y THERMAL CHANGE
-                                                              + dt * k * (U.E(seq(2, n0-3, 2), seq(4, n-1, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(4, n-1, 2), seq(2, n-3, 2)) * c) - U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c)) / (dy*dy)
-                                                              + dt * k * (U.E(seq(2, n0-3, 2), seq(0, n-5, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(0, n-5, 2), seq(2, n-3, 2)) * c) - U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c)) / (dy*dy)
-                                                              // Z THERMAL CHANGE
-                                                              + dt * k * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(4, n-1, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(4, n-1, 2)) * c) - U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c)) / (dz*dz)
-                                                              + dt * k * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(0, n-5, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(0, n-5, 2)) * c) - U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c)) / (dz*dz)
+                                                          // X THERMAL CHANGE
+                                                          + dt * k * (U.E(seq(4, n0-1, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(4, n0-1, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c) - U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c)) / (dx*dx)
+                                                          + dt * k * (U.E(seq(0, n0-5, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(0, n0-5, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c) - U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c)) / (dx*dx)
+                                                          // Y THERMAL CHANGE
+                                                          + dt * k * (U.E(seq(2, n0-3, 2), seq(4, n-1, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(4, n-1, 2), seq(2, n-3, 2)) * c) - U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c)) / (dy*dy)
+                                                          + dt * k * (U.E(seq(2, n0-3, 2), seq(0, n-5, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(0, n-5, 2), seq(2, n-3, 2)) * c) - U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c)) / (dy*dy)
+                                                          // Z THERMAL CHANGE
+                                                          + dt * k * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(4, n-1, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(4, n-1, 2)) * c) - U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c)) / (dz*dz)
+                                                          + dt * k * (U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(0, n-5, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(0, n-5, 2)) * c) - U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) / (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * c)) / (dz*dz)
     );
 
     // X VELOCITY CHANGE
     auto p1_x = U.E(seq(4, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * (gammac - 1);
     auto p2_x = U.E(seq(2, n0-5, 2), seq(2, n-3, 2), seq(2, n-3, 2)) * (gammac - 1);
     VX(seq(3, n0-4, 2), seq(2, n-3, 2), seq(2, n-3, 2)) = (U.VX(seq(3, n0-4, 2), seq(2, n-3, 2), seq(2, n-3, 2))
-                                                               - dt * p1_x / (dx * (U.RO(seq(2, n0-5, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(4, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2))))
-                                                               + dt * p2_x / (dx * (U.RO(seq(2, n0-5, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(4, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2))))
+                                                           - dt * p1_x / (dx * (U.RO(seq(2, n0-5, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(4, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2))))
+                                                           + dt * p2_x / (dx * (U.RO(seq(2, n0-5, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.RO(seq(4, n0-3, 2), seq(2, n-3, 2), seq(2, n-3, 2))))
     );
 
     // Y VELOCITY CHANGE
     auto p1_y = U.E(seq(2, n0-3, 2), seq(4, n-3, 2), seq(2, n-3, 2)) * (gammac - 1);
     auto p2_y = U.E(seq(2, n0-3, 2), seq(2, n-5, 2), seq(2, n-3, 2)) * (gammac - 1);
     VY(seq(2, n0-3, 2), seq(3, n-4, 2), seq(2, n-3, 2)) = (U.VY(seq(2, n0-3, 2), seq(3, n-4, 2), seq(2, n-3, 2))
-                                                               - dt * p1_y / (dy * (U.RO(seq(2, n0-3, 2), seq(2, n-5, 2), seq(2, n-3, 2)) + U.RO(seq(2, n0-3, 2), seq(4, n-3, 2), seq(2, n-3, 2))))
-                                                               + dt * p2_y / (dy * (U.RO(seq(2, n0-3, 2), seq(2, n-5, 2), seq(2, n-3, 2)) + U.RO(seq(2, n0-3, 2), seq(4, n-3, 2), seq(2, n-3, 2))))
+                                                           - dt * p1_y / (dy * (U.RO(seq(2, n0-3, 2), seq(2, n-5, 2), seq(2, n-3, 2)) + U.RO(seq(2, n0-3, 2), seq(4, n-3, 2), seq(2, n-3, 2))))
+                                                           + dt * p2_y / (dy * (U.RO(seq(2, n0-3, 2), seq(2, n-5, 2), seq(2, n-3, 2)) + U.RO(seq(2, n0-3, 2), seq(4, n-3, 2), seq(2, n-3, 2))))
     );
     // Z VELOCITY CHANGE
     auto p1_z = U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(4, n-3, 2)) * (gammac - 1);
     auto p2_z = U.E(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-5, 2)) * (gammac - 1);
     VZ(seq(2, n0-3, 2), seq(2, n-3, 2), seq(3, n-4, 2)) = (U.VZ(seq(2, n0-3, 2), seq(2, n-3, 2), seq(3, n-4, 2))
-                                                               - dt * p1_z / (dz * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-5, 2)) + U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(4, n-3, 2))))
-                                                               + dt * p2_z / (dz * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-5, 2)) + U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(4, n-3, 2))))
+                                                           - dt * p1_z / (dz * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-5, 2)) + U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(4, n-3, 2))))
+                                                           + dt * p2_z / (dz * (U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(2, n-5, 2)) + U.RO(seq(2, n0-3, 2), seq(2, n-3, 2), seq(4, n-3, 2))))
     );
 }
 
 
-void write_frame(std::vector<int> U, const std::string &path) {
-    std::ofstream file(path);
-    std::cout << "ints\n" << std::accumulate(std::next(U.begin()), U.end(), std::to_string(U[0]),
-                                        [](std::string a, int b) {
-        return std::move(a) + ',' + std::to_string(b);
-    }) << std::endl;
-}
-
-
-void writer_fq(tbb::concurrent_queue<std::pair<std::vector<int>, std::string>> &queue){
-    std::pair<std::vector<int>, std::string> p;
-    while (true) {
-        auto ok = queue.try_pop(p);
-        if (ok){
-            auto U = p.first;
-            auto path = p.second;
-
-            if (path == "poison") return;
-            write_frame(U, path);
-        }
-    }
-}
-
-
-void write_proces(int writeTimeN, int n, const mpi::communicator& comm) {
-    auto start = std::chrono::system_clock::now();
-    tbb::concurrent_queue<std::pair<std::vector<int>, std::string>> write_queue;
-    std::thread writer(writer_fq, std::ref(write_queue));
-
-    std::vector<int> write_buffer;
-
-    for (int writeI = 0; writeI < writeTimeN; writeI++) {
-        mpi::gather(comm, 0, write_buffer, comm.size() - 1);
-        write_buffer.pop_back();
-        write_queue.push(std::make_pair(std::vector<int>(write_buffer), "../data/exp_af_" + std::to_string(n) + "_state_" + std::to_string(writeI) + ".csv"));
-    }
-    write_queue.push(std::make_pair(std::vector<int>{}, "poison"));
-    writer.join();
+SysState::~SysState() {
+    delete[] recvdData;
+    delete[] rightOut;
+    delete[] leftOut;
 }
 
 
 int main(int argc, char *argv []) {
+    mpi::environment env{argc, argv, mpi::threading::funneled};
+    mpi::communicator compute;
 
-    mpi::environment env{argc, argv};
-
-    if (argc != 5){
+    if (argc != 4) {
         std::cout << "DOUN" << std::endl;
         env.abort(1);
     }
-
-    mpi::communicator compute;
 
     std::ios::sync_with_stdio(false);
 
     int n = std::stoi(argv[1]);
     int timeN = std::stoi(argv[2]);
-    int logfreq = std::stoi(argv[3]);
-    int savefreq = std::stoi(argv[4]);
-    int writeTimeN = static_cast<int>(timeN / savefreq);
+    std::string backend = argv[3];
 
-    if (compute.rank() == 0){
-        af::setDevice(0);
+    /////////////////////////// SELECT BACKEND
+    if (backend == "CPU"){
+        af::setBackend(AF_BACKEND_CPU);
     }
-    if (compute.rank() == 1){
-        af::setDevice(1);
+    else if (backend == "OPENCL_GPU"){
+        af::setBackend(AF_BACKEND_OPENCL);
+        af::setDevice(compute.rank());
+    }
+    else if (backend == "CUDA"){
+        af::setBackend(AF_BACKEND_CUDA);
+        af::setDevice(compute.rank());
+    }
+    else{
+        std::cout << "Backend not supported" << std::endl;
     }
 
-    // af::setDevice(1);
     int strip_len;
-    strip_len = static_cast<int>(compute.rank() == 0 ? n - std::round(n / compute.size()) * (compute.size() - 1) : std::round(n / compute.size()));
-    strip_len = compute.rank() == 0 || compute.rank() == compute.size()-1 ? strip_len + 1 : strip_len + 2;
+    int start_i = 0;
+    for (size_t i = 0; i < compute.rank(); i++) {
+        start_i += static_cast<int>(i == 0 ? n - std::round(n / compute.size()) * (compute.size() - 1)
+                : std::round(n / compute.size())) - 2;
+    }
+    strip_len = static_cast<int>(compute.rank() == 0 ? n - std::round(n / compute.size()) * (compute.size() - 1)
+            : std::round(n / compute.size()));
+    strip_len = compute.rank() == 0 || compute.rank() == compute.size()-1 ? strip_len + 2 : strip_len + 4;
     int next_node = (compute.rank()+1) % compute.size();
     int prev_node = (compute.rank()+compute.size()-1) % compute.size();
 
-    SysState U{n, strip_len, 1.25, 0, 0, 0, 300, prev_node, next_node, compute}, Upre(U), Ucor(U);
-    if (compute.rank() == 1) {
-        U.setE(9, 9, 9, 1.25, 400);
-    }
+    SysState U{n, start_i, strip_len, 1.25, 0, 0, 0, 300, prev_node, next_node, compute}, Upre(U), Ucor(U);
+    U.setE(n / 2 , n / 2, n / 2, 1.25, 400);
 
     compute.barrier();
-    auto start = std::chrono::system_clock::now();
-
+    auto begin = std::chrono::system_clock::now();
     for (int timeI = 0; timeI < timeN; timeI++) {
         Upre.update(U);
         Ucor.update(Upre);
         U.addNormalized(Upre, Ucor, 0.5);
-        compute.barrier();
-
-        if (timeI % savefreq == 0) {
-            if (compute.rank() == 0) {
-                std::cout << "arr: " << timeI << std::endl;
-            }
-            // mpi::gather(world, strip_len, world.size() - 1);
-        }
+    }
+    compute.barrier();
+    auto end = std::chrono::system_clock::now();
+    if (compute.rank() == 0){
+        std::cout << double((end - begin).count()) / 1e9 << std::endl;
     }
 }

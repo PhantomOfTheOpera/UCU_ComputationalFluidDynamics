@@ -37,15 +37,7 @@ public:
         this->VZ = af::constant(vz, n, n, n);
         this->E = af::constant(ro*ro*c*T, n, n, n);
     }
-    // SysState(){
-    //     int n = 1;
-    //     this->n = n;
-    //     this->RO = af::constant(0, n, n, n);
-    //     this->VX = af::constant(0, n, n, n);
-    //     this->VY = af::constant(0, n, n, n);
-    //     this->VZ = af::constant(0, n, n, n);
-    //     this->E = af::constant(0, n, n, n);
-    // }
+
     void operator+=(const SysState &st){
         RO = RO + st.RO;
         VX = VX + st.VX;
@@ -90,11 +82,6 @@ void update(SysState &U, SysState &Unew){
                     // Z ENERGY CHANGE
                     - dt * gammac * (U.E(seq(2, n-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.E(seq(2, n-3, 2), seq(2, n-3, 2), seq(4, n-1, 2))) * U.VZ(seq(2, n-3, 2), seq(2, n-3, 2), seq(3, n-2, 2)) / (dz * 2)
                     + dt * gammac * (U.E(seq(2, n-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) + U.E(seq(2, n-3, 2), seq(2, n-3, 2), seq(0, n-5, 2))) * U.VZ(seq(2, n-3, 2), seq(2, n-3, 2), seq(1, n-4, 2)) / (dz * 2)
-
-                    // + dt * U.RO(seq(2, n-3, 2)) * self.q[2:n-1:2, 2:n-1:2, 2:n-1:2]
-                    // + dt * U[2:n-1:2, 2:n-1:2, 2:n-1:2, 0] * (self.fx[2:n-1:2, 2:n-1:2, 2:n-1:2] * (U[3:n:2, 2:n-1:2, 2:n-1:2, 1] + U[1:n-2:2, 2:n-1:2, 2:n-1:2, 1]) / 2 
-                    //                                         + self.fy[2:n-1:2, 2:n-1:2, 2:n-1:2] * (U[2:n-1:2, 3:n:2, 2:n-1:2, 2] + U[2:n-1:2, 1:n-2:2, 2:n-1:2, 2]) / 2 
-                    //                                         + self.fz[2:n-1:2, 2:n-1:2, 2:n-1:2] * (U[2:n-1:2, 2:n-1:2, 3:n:2, 3] + U[2:n-1:2, 2:n-1:2, 1:n-2:2, 3]) / 2)
             );
     
     Unew.E(seq(2, n-3, 2), seq(2, n-3, 2), seq(2, n-3, 2)) = (Unew.E(seq(2, n-3, 2), seq(2, n-3, 2), seq(2, n-3, 2))
@@ -161,11 +148,6 @@ void read_init_state(const char* path, SysState &U, SysState &U_predictor, SysSt
     U_corrector.RO = af::readArray(path, "vz");
     U_corrector.RO = af::readArray(path, "e");
     
-    // af::saveArray("ro", U.RO, "../../../explosion.af");
-    // af::saveArray("vx", U.VX, "../../../explosion.af", true);
-    // af::saveArray("vy", U.VY, "../../../explosion.af", true);
-    // af::saveArray("vz", U.VZ, "../../../explosion.af", true);
-    // af::saveArray("e", U.E, "../../../explosion.af", true);
 }
 
 
@@ -184,21 +166,17 @@ int main(int argc, char *argv[]) {
     /////////////////////////// SELECT BACKEND
     if (backend == "CPU"){
         af::setBackend(AF_BACKEND_CPU);
-        af::info();
     }
     else if (backend == "OPENCL_CPU"){
         af::setBackend(AF_BACKEND_OPENCL);
         af::setDevice(2);
-        af::info();
     }
     else if (backend == "OPENCL_GPU"){
         af::setBackend(AF_BACKEND_OPENCL);
         af::setDevice(0);
-        af::info();
     }
     else if (backend == "CUDA"){
         af::setBackend(AF_BACKEND_CUDA);
-        af::info();
     }
     else{
         std::cout << "Backend not supported" << std::endl;
